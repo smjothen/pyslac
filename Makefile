@@ -1,5 +1,5 @@
 # all the recipes are phony (no files to check).
-.PHONY: .check-env-vars .deps .pip-install docs tests build dev run update install-local run-local deploy help release configure-credentials
+.PHONY: .check-env-vars .deps .pip-install docs tests build dev run update install-local run-local deploy help release configure-credentials run-integration-test
 .DEFAULT_GOAL := help
 
 IS_LINUX_OS := $(shell uname -s | grep -c Linux)
@@ -21,6 +21,7 @@ help:
 	@echo "  poetry-update             updates the dependencies in poetry.lock"
 	@echo "  install-local             installs pyslac into the current environment"
 	@echo "  tests                     run all the tests"
+	@echo "  run-integration-test      run the EV+EVSE end-to-end integration test (requires root)"
 	@echo "  reformat                  reformats the code, using Black"
 	@echo "  flake8                    flakes8 the code"
 	@echo "  release version=<mj.mn.p> bumps the project version to <mj.mn.p>, using poetry;"
@@ -75,6 +76,9 @@ run-local-sudo-multiple:
 
 run-ev-slac:
 	sudo $(shell which python) pyslac/examples/ev_slac_scapy.py
+
+run-integration-test:
+	sudo $(shell which python) -m pytest tests/test_integration_ev_evse.py -v -s
 
 mypy:
 	mypy --config-file pyproject.toml pyslac tests

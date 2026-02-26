@@ -192,6 +192,44 @@ This integration test was tested under:
 
 - Linux - Ubuntu and Debian distros
 
+## End-to-End Integration Test (EV + EVSE together)
+
+`tests/test_integration_ev_evse.py` contains a fully automated integration test
+that runs the native `SlacEvSession` (EV side) and `SlacEvseSession` (EVSE side)
+through the complete SLAC matching protocol in a single process.
+
+### In-memory mode (no root required – runs in CI)
+
+The test uses an asyncio-queue based `SocketBridge` instead of real sockets, so
+it does **not** require root privileges or real network interfaces.  The bridge
+routes frames between the two sessions and synthesises the `CM_ATTEN_PROFILE.IND`
+messages that a real PLC chip would generate for each `CM_MNBC_SOUND.IND`.
+
+```bash
+pytest tests/test_integration_ev_evse.py -v
+```
+
+### Real veth pair mode (requires root)
+
+For testing against real Layer-2 frames, create a virtual Ethernet pair and run
+the example script:
+
+```bash
+# Create the veth pair
+sudo ip link add slac_ev0 type veth peer name slac_evse0
+sudo ip link set slac_ev0 up
+sudo ip link set slac_evse0 up
+
+# Run the integration example
+sudo python pyslac/examples/integration_ev_evse.py slac_ev0 slac_evse0
+
+# or via make:
+make run-integration-test
+```
+
+Both sessions print their final state; a successful run ends with
+`SUCCESS: Both sides reached MATCHED state.`
+
 
 ## License
 
