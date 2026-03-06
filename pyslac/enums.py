@@ -106,7 +106,6 @@ SLAC_ATTEN_TIMEOUT = 6  # [TT_EVSE_match_MNBC = 600 ms]
 class FramesSizes(int, Enum):
     """
     Frames Sizes in bytes of several messages
-    (currently only EVSE side relevant ones)
 
     The size is calculated as the summation of the size of:
     * EthernetHeader = 14 bytes
@@ -123,11 +122,14 @@ class FramesSizes(int, Enum):
 
     CM_SET_KEY_CNF = 60
     CM_SLAC_PARM_REQ = 60
+    CM_SLAC_PARM_CNF = 60
     CM_START_ATTEN_CHAR_IND = 60
     CM_MNBC_SOUND_IND = 71
     CM_ATTEN_PROFILE_IND = 85
     CM_ATTEN_CHAR_RSP = 70
+    CM_ATTEN_CHAR_IND = 129
     CM_SLAC_MATCH_REQ = 85
+    CM_SLAC_MATCH_CNF = 116
     LINK_STATUS_CNF = 60
 
 
@@ -202,6 +204,9 @@ STATE_MATCHED = 2
 EVSE_ID = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 # The dest MAC was defined in channel.c as follows in Qualcomm open-plc
 EVSE_PLC_MAC = b"\x00\xb0\x52\x00\x00\x01"
+# EV PLC chip MAC address - same default Qualcomm value as EVSE_PLC_MAC
+# since both sides use the same QCA PLC chip hardware
+EV_PLC_MAC = b"\x00\xb0\x52\x00\x00\x01"
 
 # Qualcomm settings
 # HomePlugAV0123 (defined in evse.c and also evse.ini of Qualcomm open-plc)
