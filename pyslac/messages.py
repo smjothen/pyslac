@@ -824,7 +824,7 @@ class MatchReq:
         frame = bytearray(
             self.application_type.to_bytes(1, "big")
             + self.security_type.to_bytes(1, "big")
-            + self.mvf_length.to_bytes(2, "big")
+            + self.mvf_length.to_bytes(2, "little")
             + self.pev_id.to_bytes(17, "big")
             + self.pev_mac
             + self.evse_id.to_bytes(17, "big")
