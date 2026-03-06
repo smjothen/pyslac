@@ -7,8 +7,7 @@ import asyncio
 import logging
 
 from pyslac.environment import Config
-from pyslac.session_ev import SlacEvSession
-from pyslac.session_ev_controller import SlacEvSessionController
+from pyslac.session_ev import SlacEvSession, SlacEvSessionController
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__file__)
