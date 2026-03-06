@@ -7,10 +7,27 @@ import asyncio
 import logging
 
 from pyslac.environment import Config
-from pyslac.session_ev import SlacEvSession
+from pyslac.session_ev import SlacEvSession, SlacEvSessionController
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__file__)
+
+
+class EvSlacHandler(SlacEvSessionController):
+    async def notify_matching_ongoing(self):
+        """Overrides the notify_matching_ongoing method defined in
+        SlacEvSessionController."""
+        logger.info("EV SLAC matching is ongoing")
+
+    async def notify_matching_failed(self):
+        """Overrides the notify_matching_failed method defined in
+        SlacEvSessionController."""
+        logger.error("EV SLAC matching has failed after all retries")
+
+    async def notify_matching_succeeded(self):
+        """Overrides the notify_matching_succeeded method defined in
+        SlacEvSessionController."""
+        logger.info("EV SLAC matching succeeded and logical network is joined")
 
 
 async def main(iface: str = "eth0"):
@@ -29,12 +46,8 @@ async def main(iface: str = "eth0"):
         )
         return
 
-    try:
-        logger.info("Running EV SLAC matching routine...")
-        await ev_session.matching_routine()
-        logger.info("EV SLAC matching completed successfully: MATCHED")
-    except (TimeoutError, ValueError) as e:
-        logger.error(f"EV SLAC matching failed: {e}")
+    ev_slac_handler = EvSlacHandler()
+    await ev_slac_handler.start_matching(ev_session)
 
 
 def run():
