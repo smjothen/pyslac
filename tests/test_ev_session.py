@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -646,3 +647,219 @@ def test_match_cnf_parsing(ev_mac):
     assert parsed.run_id == RUN_ID
     assert parsed.nid == QUALCOMM_NID
     assert parsed.nmk == QUALCOMM_NMK
+
+
+def _build_nw_info_cnf_frame(dst_mac, src_mac, num_nws):
+    """Helper to build a CM_NW_INFO.CNF frame for testing."""
+    CM_NW_INFO = 0xA038
+    CM_NW_INFO_CNF = CM_NW_INFO | MMTYPE_CNF
+    ethernet_header = EthernetHeader(dst_mac=dst_mac, src_mac=src_mac)
+    mmv = b"\x00"
+    mm_type_bytes = CM_NW_INFO_CNF.to_bytes(2, "little")
+    oui = (0x00B052).to_bytes(3, "big")
+    num_nws_byte = num_nws.to_bytes(1, "big")
+    frame = (
+        ethernet_header.pack_big()
+        + mmv
+        + mm_type_bytes
+        + oui
+        + num_nws_byte
+    )
+    # Pad to minimum Ethernet frame size (60 bytes)
+    if len(frame) < 60:
+        frame += b"\x00" * (60 - len(frame))
+    return frame
+
+
+@pytest.mark.asyncio
+async def test_ev_check_link_status_active(ev_slac_session, ev_mac):
+    """
+    Tests that ev_check_link_status returns True when the CM_NW_INFO.CNF
+    response indicates at least one active network (NumNws > 0).
+    """
+    from pyslac.enums import EV_PLC_MAC
+
+    ev_slac_session.pev_mac = ev_mac
+
+    nw_info_cnf_frame = _build_nw_info_cnf_frame(
+        dst_mac=ev_mac, src_mac=EV_PLC_MAC, num_nws=1
+    )
+
+    ev_slac_session.send_frame = AsyncMock()
+    with patch(
+        "pyslac.session_ev.readeth", new=AsyncMock(return_value=nw_info_cnf_frame)
+    ):
+        result = await ev_slac_session.ev_check_link_status()
+
+    assert result is True
+    ev_slac_session.send_frame.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_ev_check_link_status_no_network(ev_slac_session, ev_mac):
+    """
+    Tests that ev_check_link_status returns False when the CM_NW_INFO.CNF
+    response indicates no active networks (NumNws == 0).
+    """
+    from pyslac.enums import EV_PLC_MAC
+
+    ev_slac_session.pev_mac = ev_mac
+
+    nw_info_cnf_frame = _build_nw_info_cnf_frame(
+        dst_mac=ev_mac, src_mac=EV_PLC_MAC, num_nws=0
+    )
+
+    ev_slac_session.send_frame = AsyncMock()
+    with patch(
+        "pyslac.session_ev.readeth", new=AsyncMock(return_value=nw_info_cnf_frame)
+    ):
+        result = await ev_slac_session.ev_check_link_status()
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_ev_check_link_status_timeout(ev_slac_session, ev_mac):
+    """
+    Tests that ev_check_link_status returns False when a timeout occurs
+    waiting for the CM_NW_INFO.CNF response.
+    """
+    import asyncio
+
+    ev_slac_session.pev_mac = ev_mac
+    ev_slac_session.send_frame = AsyncMock()
+    with patch(
+        "pyslac.session_ev.readeth",
+        new=AsyncMock(side_effect=asyncio.TimeoutError("timeout")),
+    ):
+        result = await ev_slac_session.ev_check_link_status()
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_ev_check_link_status_wrong_mmtype(ev_slac_session, ev_mac):
+    """
+    Tests that ev_check_link_status returns False when the response
+    has an unexpected MMType (not CM_NW_INFO.CNF).
+    """
+    from pyslac.enums import EV_PLC_MAC
+
+    ev_slac_session.pev_mac = ev_mac
+
+    # Build a frame with wrong MMType (using LINK_STATUS CNF instead)
+    WRONG_MMTYPE = 0xA0B8 | MMTYPE_CNF
+    ethernet_header = EthernetHeader(dst_mac=ev_mac, src_mac=EV_PLC_MAC)
+    mmv = b"\x00"
+    mm_type_bytes = WRONG_MMTYPE.to_bytes(2, "little")
+    oui = (0x00B052).to_bytes(3, "big")
+    num_nws_byte = b"\x01"
+    frame = (
+        ethernet_header.pack_big()
+        + mmv
+        + mm_type_bytes
+        + oui
+        + num_nws_byte
+    )
+    frame += b"\x00" * (60 - len(frame))
+
+    ev_slac_session.send_frame = AsyncMock()
+    with patch(
+        "pyslac.session_ev.readeth", new=AsyncMock(return_value=frame)
+    ):
+        result = await ev_slac_session.ev_check_link_status()
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_set_evse_connected(ev_slac_session):
+    """
+    Tests that set_evse_connected spawns a task that runs start_matching.
+    """
+    from pyslac.session_ev import SlacEvSessionController
+
+    controller = SlacEvSessionController()
+    controller.start_matching = AsyncMock()
+
+    await controller.set_evse_connected(ev_slac_session)
+
+    assert ev_slac_session.matching_process_task is not None
+    # Give the task a chance to start
+    await asyncio.sleep(0.1)
+    controller.start_matching.assert_called_once_with(ev_slac_session)
+
+    # Clean up the task
+    ev_slac_session.matching_process_task.cancel()
+    try:
+        await ev_slac_session.matching_process_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_set_evse_connected_cancels_existing_task(ev_slac_session):
+    """
+    Tests that set_evse_connected cancels any existing matching task
+    before spawning a new one.
+    """
+    import asyncio
+    from pyslac.session_ev import SlacEvSessionController
+
+    controller = SlacEvSessionController()
+    controller.start_matching = AsyncMock()
+
+    # Simulate an existing running task
+    async def dummy_task():
+        await asyncio.sleep(100)
+
+    ev_slac_session.matching_process_task = asyncio.create_task(dummy_task())
+    old_task = ev_slac_session.matching_process_task
+
+    await controller.set_evse_connected(ev_slac_session)
+
+    assert old_task.cancelled()
+    assert ev_slac_session.matching_process_task is not None
+    assert ev_slac_session.matching_process_task != old_task
+
+    # Clean up
+    ev_slac_session.matching_process_task.cancel()
+    try:
+        await ev_slac_session.matching_process_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_start_matching_link_check_on_match(ev_slac_session):
+    """
+    Tests that after a successful match, start_matching repeatedly
+    checks the link status using CM_NW_INFO. When the link is lost,
+    the session state returns to UNMATCHED and retries matching.
+    """
+    from pyslac.session_ev import SlacEvSessionController
+
+    controller = SlacEvSessionController()
+    controller.notify_matching_ongoing = AsyncMock()
+    controller.notify_matching_succeeded = AsyncMock()
+    controller.notify_matching_failed = AsyncMock()
+
+    # First call: matching succeeds, then link check fails (link lost)
+    # Second call: matching fails (exhausts retries)
+    call_count = 0
+
+    async def mock_matching_routine():
+        nonlocal call_count
+        call_count += 1
+        ev_slac_session.state = STATE_MATCHED
+
+    ev_slac_session.matching_routine = mock_matching_routine
+    ev_slac_session.ev_check_link_status = AsyncMock(return_value=False)
+
+    with patch("pyslac.session_ev.asyncio.sleep", new=AsyncMock()):
+        await controller.start_matching(ev_slac_session, number_of_retries=2)
+
+    # Matching was attempted twice (first succeeded then link lost, second retry)
+    assert call_count == 2
+    controller.notify_matching_succeeded.assert_called()
+    ev_slac_session.ev_check_link_status.assert_called()
