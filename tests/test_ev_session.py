@@ -771,16 +771,18 @@ async def test_ev_check_link_status_wrong_mmtype(ev_slac_session, ev_mac):
 
 
 @pytest.mark.asyncio
-async def test_set_evse_connected(ev_slac_session):
+async def test_process_cp_state_spawns_task_on_b(ev_slac_session):
     """
-    Tests that set_evse_connected spawns a task that runs start_matching.
+    Tests that process_cp_state spawns a matching task when CP transitions
+    to state B and no task is running.
     """
     from pyslac.session_ev import SlacEvSessionController
 
     controller = SlacEvSessionController()
     controller.start_matching = AsyncMock()
 
-    await controller.set_evse_connected(ev_slac_session)
+    assert ev_slac_session.matching_process_task is None
+    await controller.process_cp_state(ev_slac_session, "B1")
 
     assert ev_slac_session.matching_process_task is not None
     # Give the task a chance to start
@@ -796,15 +798,14 @@ async def test_set_evse_connected(ev_slac_session):
 
 
 @pytest.mark.asyncio
-async def test_set_evse_connected_cancels_existing_task(ev_slac_session):
+async def test_process_cp_state_cancels_task_on_a(ev_slac_session):
     """
-    Tests that set_evse_connected cancels any existing matching task
-    before spawning a new one.
+    Tests that process_cp_state cancels a running matching task when
+    CP transitions to state A.
     """
     from pyslac.session_ev import SlacEvSessionController
 
     controller = SlacEvSessionController()
-    controller.start_matching = AsyncMock()
 
     # Simulate an existing running task
     async def dummy_task():
@@ -813,16 +814,92 @@ async def test_set_evse_connected_cancels_existing_task(ev_slac_session):
     ev_slac_session.matching_process_task = asyncio.create_task(dummy_task())
     old_task = ev_slac_session.matching_process_task
 
-    await controller.set_evse_connected(ev_slac_session)
+    await controller.process_cp_state(ev_slac_session, "A1")
 
     assert old_task.cancelled()
-    assert ev_slac_session.matching_process_task is not None
-    assert ev_slac_session.matching_process_task != old_task
+    assert ev_slac_session.matching_process_task is None
+
+
+@pytest.mark.asyncio
+async def test_process_cp_state_cancels_task_on_ef_when_matched(ev_slac_session):
+    """
+    Tests that process_cp_state cancels task on E/F transition only when
+    the session is in MATCHED state.
+    """
+    from pyslac.session_ev import SlacEvSessionController
+
+    controller = SlacEvSessionController()
+
+    # Simulate an existing running task in MATCHED state
+    async def dummy_task():
+        await asyncio.sleep(100)
+
+    ev_slac_session.matching_process_task = asyncio.create_task(dummy_task())
+    ev_slac_session.state = STATE_MATCHED
+
+    await controller.process_cp_state(ev_slac_session, "E")
+
+    assert ev_slac_session.matching_process_task is None
+
+
+@pytest.mark.asyncio
+async def test_process_cp_state_keeps_task_on_ef_when_not_matched(ev_slac_session):
+    """
+    Tests that process_cp_state does NOT cancel task on E/F transition
+    when the session is NOT in MATCHED state (e.g. still MATCHING).
+    """
+    from pyslac.session_ev import SlacEvSessionController
+
+    controller = SlacEvSessionController()
+
+    async def dummy_task():
+        await asyncio.sleep(100)
+
+    ev_slac_session.matching_process_task = asyncio.create_task(dummy_task())
+    old_task = ev_slac_session.matching_process_task
+    ev_slac_session.state = STATE_MATCHING
+
+    await controller.process_cp_state(ev_slac_session, "F")
+
+    # Task should still be running since state is not MATCHED
+    assert ev_slac_session.matching_process_task is old_task
+    assert not old_task.cancelled()
 
     # Clean up
-    ev_slac_session.matching_process_task.cancel()
+    old_task.cancel()
     try:
-        await ev_slac_session.matching_process_task
+        await old_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_process_cp_state_no_spawn_when_task_exists(ev_slac_session):
+    """
+    Tests that process_cp_state does NOT spawn a new task when one already
+    exists, even on B/C/D transition.
+    """
+    from pyslac.session_ev import SlacEvSessionController
+
+    controller = SlacEvSessionController()
+    controller.start_matching = AsyncMock()
+
+    async def dummy_task():
+        await asyncio.sleep(100)
+
+    ev_slac_session.matching_process_task = asyncio.create_task(dummy_task())
+    old_task = ev_slac_session.matching_process_task
+
+    await controller.process_cp_state(ev_slac_session, "C1")
+
+    # Should not have spawned a new task
+    assert ev_slac_session.matching_process_task is old_task
+    controller.start_matching.assert_not_called()
+
+    # Clean up
+    old_task.cancel()
+    try:
+        await old_task
     except asyncio.CancelledError:
         pass
 

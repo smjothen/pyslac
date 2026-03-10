@@ -615,21 +615,27 @@ class SlacEvSessionController:
 
         logger.debug("EV SLAC Protocol Concluded...")
 
-    async def set_evse_connected(self, slac_session: SlacEvSession) -> None:
+    async def process_cp_state(self, slac_session: SlacEvSession, state: str):
         """
-        Called when the EVSE is connected (e.g. on plug-in event).
-        Spawns a task that runs start_matching to begin the SLAC
-        matching process.
-
-        :param slac_session: Instance of SlacEvSession
+        If a matching process is not ongoing and the CP has transited to
+        state B, C or D, it spawns a new matching task.
+        If transited to A, E or F and a matching task is running and
+        the state is "Matched", then it kills the task. This extra check for
+        the state "Matched" is to avoid killing the task during transitions to
+        state E/F which can happen, e.g., if user does EIM after Plugin and
+        before the first SLAC message is received.
         """
-        if slac_session.matching_process_task is not None:
-            logger.debug("Matching process task already running, cancelling...")
-            await cancel_task(slac_session.matching_process_task)
-            slac_session.matching_process_task = None
-
-        slac_session.matching_process_task = asyncio.create_task(
-            self.start_matching(slac_session)
-        )
-        slac_session.matching_process_task.add_done_callback(task_callback)
-        logger.info("EV SLAC matching task spawned.")
+        cp_state = state[0]
+        logger.debug(f"CP State Received: {state}")
+        if cp_state in ["A", "E", "F"] and slac_session.matching_process_task:
+            if cp_state == "A" or slac_session.state == STATE_MATCHED:
+                await cancel_task(slac_session.matching_process_task)
+                logger.debug("Matching process task canceled")
+                slac_session.matching_process_task = None
+                logger.debug("Leaving Logical Network")
+        elif cp_state in ["B", "C", "D"] and slac_session.matching_process_task is None:
+            slac_session.matching_process_task = asyncio.create_task(
+                self.start_matching(slac_session)
+            )
+            slac_session.matching_process_task.add_done_callback(task_callback)
+            logger.info("EV SLAC matching task spawned.")
