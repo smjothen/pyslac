@@ -651,18 +651,14 @@ def test_match_cnf_parsing(ev_mac):
 
 def _build_nw_info_cnf_frame(dst_mac, src_mac, num_nws):
     """Helper to build a CM_NW_INFO.CNF frame for testing."""
-    CM_NW_INFO = 0xA038
+    CM_NW_INFO = 0x6038
     CM_NW_INFO_CNF = CM_NW_INFO | MMTYPE_CNF
     ethernet_header = EthernetHeader(dst_mac=dst_mac, src_mac=src_mac)
-    mmv = b"\x00"
-    mm_type_bytes = CM_NW_INFO_CNF.to_bytes(2, "little")
-    oui = (0x00B052).to_bytes(3, "big")
+    homeplug_header = HomePlugHeader(mm_type=CM_NW_INFO_CNF)
     num_nws_byte = num_nws.to_bytes(1, "big")
     frame = (
         ethernet_header.pack_big()
-        + mmv
-        + mm_type_bytes
-        + oui
+        + homeplug_header.pack_big()
         + num_nws_byte
     )
     # Pad to minimum Ethernet frame size (60 bytes)

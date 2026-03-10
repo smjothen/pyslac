@@ -459,7 +459,7 @@ class SlacEvSession(SlacSession):
         Sends a CM_NW_INFO.REQ to the EV PLC chip and checks the
         CM_NW_INFO.CNF response to verify the link is active.
 
-        CM_NW_INFO is a Qualcomm vendor-specific MME that returns
+        CM_NW_INFO is a standard HomePlug MME (0x6038) that returns
         information about the networks the PLC chip has joined.
         If NumNws > 0 in the response, the link is considered active.
 
@@ -469,28 +469,20 @@ class SlacEvSession(SlacSession):
         ethernet_header = EthernetHeader(
             dst_mac=self.ev_plc_mac, src_mac=self.pev_mac
         )
-        # CM_NW_INFO is a Qualcomm vendor-specific MME (mmv = 0x00)
-        CM_NW_INFO = 0xA038
-        mmv = b"\x00"
+        CM_NW_INFO = 0x6038
         mm_type = CM_NW_INFO | MMTYPE_REQ
-        # Vendor MMEs do not use the fragmentation fields
-        homeplug_header_no_fragm = mmv + mm_type.to_bytes(2, "little")
-        # Qualcomm OUI
-        vendor_mme = 0x00B052
-        nw_info_req_payload = vendor_mme.to_bytes(3, "big")
+        homeplug_header = HomePlugHeader(mm_type=mm_type)
 
         frame_to_send = (
             ethernet_header.pack_big()
-            + homeplug_header_no_fragm
-            + nw_info_req_payload
+            + homeplug_header.pack_big()
         )
 
         try:
             await self.send_frame(frame_to_send)
             # A CM_NW_INFO.CNF frame has at least 60 bytes (min ETH frame):
             # EthernetHeader = 14 bytes
-            # HomePlugHeaderNoFrag = 3 bytes
-            # OUI = 3 bytes
+            # HomePlugHeader = 5 bytes (mmv + mmtype + fmsn + fmid)
             # NumNws = 1 byte
             # Padding to reach min 60 bytes
             payload_rcvd = await self.rcv_frame(
@@ -507,8 +499,8 @@ class SlacEvSession(SlacSession):
                 logger.warning("Message received is not CM_NW_INFO.CNF")
                 return False
             # NumNws is the number of networks the PLC chip has joined,
-            # located after EthernetHeader(14) + mmv(1) + mmtype(2) + OUI(3)
-            num_nws = payload_rcvd[20]
+            # located after EthernetHeader(14) + HomePlugHeader(5)
+            num_nws = payload_rcvd[19]
             if num_nws > 0:
                 logger.debug("EV Link Status: Active (NumNws=%d)", num_nws)
                 return True
