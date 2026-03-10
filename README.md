@@ -24,7 +24,7 @@ and the network interface for two EVSEs:
   "number_of_evses": 2,
   "parameters": [
 	{"evse_id": "DE*SWT*E123456789",
-	  "network_interface": "eth0"
+	  "network_interface": "eth1"
 	},
 	{"evse_id": "DE*SWT*E5131456589",
 	  "network_interface": "eth1"
