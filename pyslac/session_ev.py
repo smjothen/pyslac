@@ -610,8 +610,8 @@ class SlacEvSessionController:
                         logger.warning("EV-EVSE Link Lost (CM_NW_INFO)")
                         slac_session.state = STATE_UNMATCHED
                         break
-                if slac_session.state == STATE_UNMATCHED:
-                    continue
+                # Link was lost; retry matching if retries remain
+                continue
 
         logger.debug("EV SLAC Protocol Concluded...")
 

@@ -724,8 +724,6 @@ async def test_ev_check_link_status_timeout(ev_slac_session, ev_mac):
     Tests that ev_check_link_status returns False when a timeout occurs
     waiting for the CM_NW_INFO.CNF response.
     """
-    import asyncio
-
     ev_slac_session.pev_mac = ev_mac
     ev_slac_session.send_frame = AsyncMock()
     with patch(
@@ -803,7 +801,6 @@ async def test_set_evse_connected_cancels_existing_task(ev_slac_session):
     Tests that set_evse_connected cancels any existing matching task
     before spawning a new one.
     """
-    import asyncio
     from pyslac.session_ev import SlacEvSessionController
 
     controller = SlacEvSessionController()
