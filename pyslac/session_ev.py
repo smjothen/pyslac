@@ -620,10 +620,10 @@ class SlacEvSessionController:
         If a matching process is not ongoing and the CP has transited to
         state B, C or D, it spawns a new matching task.
         If transited to A, E or F and a matching task is running and
-        the state is "Matched", then it kills the task. This extra check for
-        the state "Matched" is to avoid killing the task during transitions to
-        state E/F which can happen, e.g., if user does EIM after Plugin and
-        before the first SLAC message is received.
+        the state is "Matched", then it cancels the task. This extra check
+        for the state "Matched" is to avoid cancelling the task during
+        transitions to state E/F which can happen, e.g., if user does EIM
+        after Plugin and before the first SLAC message is received.
         """
         cp_state = state[0]
         logger.debug(f"CP State Received: {state}")
