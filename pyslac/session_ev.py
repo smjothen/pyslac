@@ -52,7 +52,7 @@ from pyslac.sockets.async_linux_socket import (
     readeth,
     sendeth,
 )
-from pyslac.utils import generate_nid, get_if_hwaddr
+from pyslac.utils import cancel_task, generate_nid, get_if_hwaddr, task_callback
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("slac_ev_session")
@@ -454,6 +454,63 @@ class SlacEvSession(SlacSession):
         logger.info("EV Join Network: Finished!")
         return data_rcvd
 
+    async def ev_check_link_status(self) -> bool:
+        """
+        Sends a CM_NW_INFO.REQ to the EV PLC chip and checks the
+        CM_NW_INFO.CNF response to verify the link is active.
+
+        CM_NW_INFO is a standard HomePlug MME (0x6038) that returns
+        information about the networks the PLC chip has joined.
+        If NumNws > 0 in the response, the link is considered active.
+
+        Returns True if the link is active, False otherwise.
+        """
+        logger.debug("EV Checking Link Status (CM_NW_INFO)...")
+        ethernet_header = EthernetHeader(
+            dst_mac=self.ev_plc_mac, src_mac=self.pev_mac
+        )
+        CM_NW_INFO = 0x6038
+        mm_type = CM_NW_INFO | MMTYPE_REQ
+        homeplug_header = HomePlugHeader(mm_type=mm_type)
+
+        frame_to_send = (
+            ethernet_header.pack_big()
+            + homeplug_header.pack_big()
+        )
+
+        try:
+            await self.send_frame(frame_to_send)
+            # A CM_NW_INFO.CNF frame has at least 60 bytes (min ETH frame):
+            # EthernetHeader = 14 bytes
+            # HomePlugHeader = 5 bytes (mmv + mmtype + fmsn + fmid)
+            # NumNws = 1 byte
+            # Padding to reach min 60 bytes
+            payload_rcvd = await self.rcv_frame(
+                rcv_frame_size=60,
+                timeout=Timers.SLAC_INIT_TIMEOUT,
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug("EV CM_NW_INFO: No response received: %s", e)
+            return False
+
+        try:
+            mm_type_rcvd = int.from_bytes(payload_rcvd[15:17], "little")
+            if mm_type_rcvd != (CM_NW_INFO | MMTYPE_CNF):
+                logger.warning("Message received is not CM_NW_INFO.CNF")
+                return False
+            # NumNws is the number of networks the PLC chip has joined,
+            # located after EthernetHeader(14) + HomePlugHeader(5)
+            num_nws = payload_rcvd[19]
+            if num_nws > 0:
+                logger.debug("EV Link Status: Active (NumNws=%d)", num_nws)
+                return True
+            else:
+                logger.debug("EV Link Status: No networks found")
+                return False
+        except (ValueError, IndexError) as e:
+            logger.error("EV CM_NW_INFO: Error parsing response: %s", e)
+            return False
+
     async def matching_routine(self) -> None:
         """
         Orchestrates the full EV-side SLAC matching sequence:
@@ -536,7 +593,41 @@ class SlacEvSessionController:
             if slac_session.state == STATE_MATCHED:
                 logger.info("EV-EVSE MATCHED Successfully, Logical Network Joined.")
                 await self.notify_matching_succeeded()
+                # Repeatedly send CM_NW_INFO packets to verify the link
+                # is correctly set up and remains active
                 while True:
                     await asyncio.sleep(2.0)
+                    link_active = await slac_session.ev_check_link_status()
+                    if not link_active:
+                        logger.warning("EV-EVSE Link Lost (CM_NW_INFO)")
+                        slac_session.state = STATE_UNMATCHED
+                        break
+                # Link was lost; retry matching if retries remain
+                continue
 
         logger.debug("EV SLAC Protocol Concluded...")
+
+    async def process_cp_state(self, slac_session: SlacEvSession, state: str):
+        """
+        If a matching process is not ongoing and the CP has transited to
+        state B, C or D, it spawns a new matching task.
+        If transited to A, E or F and a matching task is running and
+        the state is "Matched", then it cancels the task. This extra check
+        for the state "Matched" is to avoid cancelling the task during
+        transitions to state E/F which can happen, e.g., if user does EIM
+        after Plugin and before the first SLAC message is received.
+        """
+        cp_state = state[0]
+        logger.debug(f"CP State Received: {state}")
+        if cp_state in ["A", "E", "F"] and slac_session.matching_process_task:
+            if cp_state == "A" or slac_session.state == STATE_MATCHED:
+                await cancel_task(slac_session.matching_process_task)
+                logger.debug("Matching process task canceled")
+                slac_session.matching_process_task = None
+                logger.debug("Leaving Logical Network")
+        elif cp_state in ["B", "C", "D"] and slac_session.matching_process_task is None:
+            slac_session.matching_process_task = asyncio.create_task(
+                self.start_matching(slac_session)
+            )
+            slac_session.matching_process_task.add_done_callback(task_callback)
+            logger.info("EV SLAC matching task spawned.")
