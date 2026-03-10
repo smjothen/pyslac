@@ -30,7 +30,7 @@ class EvSlacHandler(SlacEvSessionController):
         logger.info("EV SLAC matching succeeded and logical network is joined")
 
 
-async def main(iface: str = "eth0"):
+async def main(iface: str = "eth1"):
     slac_config = Config()
     slac_config.load_envs()
 
