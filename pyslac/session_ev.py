@@ -3,10 +3,11 @@ import logging
 from binascii import hexlify
 from inspect import isawaitable
 from os import urandom
-from typing import Union
+from typing import Any, Callable, Optional, Tuple, Type, Union
 
 from pyslac.enums import (
     BROADCAST_ADDR,
+    BUFF_MAX_SIZE,
     CM_ATTEN_CHAR,
     CM_SET_KEY,
     CM_SLAC_MATCH,
@@ -28,7 +29,6 @@ from pyslac.enums import (
     STATE_MATCHED,
     STATE_MATCHING,
     STATE_UNMATCHED,
-    FramesSizes,
     Timers,
 )
 from pyslac.environment import Config
@@ -86,17 +86,85 @@ class SlacEvSession(SlacSession):
 
     async def rcv_frame(self, rcv_frame_size: int, timeout: Union[float, int]) -> bytes:
         """
-        Helper function to reduce lines of code when calling asyncio.wait_for
-        with readeth
+        Read one complete Ethernet frame from the raw socket.
 
-        :param rcv_frame_size: size of the frame to be received
+        The rcv_frame_size parameter is kept for compatibility with existing
+        callers, but intentionally ignored. Reading exact expected SLAC message
+        sizes can concatenate unrelated shorter frames with later packets.
+
+        :param rcv_frame_size: ignored expected size from older callers
         :param timeout: timeout for the specific message that is being expected
         :return:
         """
         return await asyncio.wait_for(
-            readeth(self.socket, self.iface, rcv_frame_size),
+            readeth(s=self.socket, iface=self.iface, rcv_frame_size=BUFF_MAX_SIZE),
             timeout,
         )
+
+    async def wait_for_mme(
+        self,
+        expected_mm_type: int,
+        timeout: Union[float, int],
+        message_type: Optional[Type[Any]] = None,
+        validate: Optional[
+            Callable[[Any, EthernetHeader, HomePlugHeader], bool]
+        ] = None,
+        on_unexpected: Optional[
+            Callable[[bytes, EthernetHeader, HomePlugHeader], Union[bool, Any]]
+        ] = None,
+    ) -> Tuple[bytes, EthernetHeader, HomePlugHeader, Any]:
+        """
+        Wait for a specific HomePlug MME using one absolute timeout.
+
+        Unrelated or stale MMEs are ignored without resetting the deadline.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + float(timeout)
+
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+
+            data_rcvd = await self.rcv_frame(BUFF_MAX_SIZE, remaining)
+            logger.debug("Payload Received: \n %s", hexlify(data_rcvd))
+
+            ether_frame = EthernetHeader.from_bytes(data_rcvd)
+            homeplug_frame = HomePlugHeader.from_bytes(data_rcvd)
+            if (
+                ether_frame.ether_type != ETH_TYPE_HPAV
+                or homeplug_frame.mmv != HOMEPLUG_MMV
+            ):
+                logger.debug("Ignoring non-HomePlug SLAC frame")
+                continue
+
+            if homeplug_frame.mm_type != expected_mm_type:
+                handled = False
+                if on_unexpected:
+                    handled = on_unexpected(data_rcvd, ether_frame, homeplug_frame)
+                    if isawaitable(handled):
+                        handled = await handled
+
+                if handled:
+                    logger.debug(
+                        "Handled unexpected MME %04X while waiting for %04X",
+                        homeplug_frame.mm_type,
+                        expected_mm_type,
+                    )
+                    continue
+
+                logger.warning(
+                    "Frame received is not expected MME %04X, got %04X",
+                    expected_mm_type,
+                    homeplug_frame.mm_type,
+                )
+                continue
+
+            message = message_type.from_bytes(data_rcvd) if message_type else None
+            if validate and not validate(message, ether_frame, homeplug_frame):
+                continue
+
+            return data_rcvd, ether_frame, homeplug_frame, message
 
     async def ev_set_key(self) -> bytes:
         """
@@ -124,9 +192,10 @@ class SlacEvSession(SlacSession):
 
         try:
             await self.send_frame(frame_to_send)
-            data_rcvd = await self.rcv_frame(
-                rcv_frame_size=FramesSizes.CM_SET_KEY_CNF,
-                timeout=Timers.SLAC_INIT_TIMEOUT,
+            data_rcvd, _, _, _ = await self.wait_for_mme(
+                CM_SET_KEY | MMTYPE_CNF,
+                Timers.SLAC_INIT_TIMEOUT,
+                SetKeyCnf,
             )
         except asyncio.TimeoutError as e:
             raise TimeoutError("EV SetKey Timeout raised") from e
@@ -176,35 +245,26 @@ class SlacEvSession(SlacSession):
         await self.send_frame(frame_to_send)
         logger.debug("Sent CM_SLAC_PARM.REQ")
 
-        while True:
-            try:
-                data_rcvd = await self.rcv_frame(
-                    rcv_frame_size=FramesSizes.CM_SLAC_PARM_CNF,
-                    timeout=Timers.SLAC_INIT_TIMEOUT,
-                )
-            except asyncio.TimeoutError as e:
-                logger.warning("Timeout waiting for CM_SLAC_PARM.CNF: %s", e)
-                raise e
-            try:
-                ether_frame = EthernetHeader.from_bytes(data_rcvd)
-                homeplug_frame = HomePlugHeader.from_bytes(data_rcvd)
-                if homeplug_frame.mm_type != CM_SLAC_PARM | MMTYPE_CNF:
-                    logger.warning("Frame received is not CM_SLAC_PARM.CNF")
-                    logger.debug("Continue waiting for CM_SLAC_PARM.CNF...")
-                    continue
-                slac_parm_cnf = SlacParmCnf.from_bytes(data_rcvd)
-            except Exception as e:
-                logger.exception(e, exc_info=True)
-                raise e
-
+        def validate_slac_parm_cnf(slac_parm_cnf, _ether_frame, _homeplug_frame):
             if slac_parm_cnf.run_id != self.run_id:
                 logger.warning(
                     "CM_SLAC_PARM.CNF run_id mismatch: expected %s, got %s",
                     hexlify(self.run_id),
                     hexlify(slac_parm_cnf.run_id),
                 )
-                continue
-            break
+                return False
+            return True
+
+        try:
+            _, ether_frame, _, slac_parm_cnf = await self.wait_for_mme(
+                CM_SLAC_PARM | MMTYPE_CNF,
+                Timers.SLAC_INIT_TIMEOUT,
+                SlacParmCnf,
+                validate_slac_parm_cnf,
+            )
+        except asyncio.TimeoutError as e:
+            logger.warning("Timeout waiting for CM_SLAC_PARM.CNF: %s", e)
+            raise e
 
         # Save EVSE parameters from the CNF
         self.evse_mac = ether_frame.src_mac
@@ -285,38 +345,27 @@ class SlacEvSession(SlacSession):
         match candidate.
         """
         logger.info("EV CM_ATTEN_CHAR: Started...")
-        while True:
-            try:
-                data_rcvd = await self.rcv_frame(
-                    rcv_frame_size=FramesSizes.CM_ATTEN_CHAR_IND,
-                    timeout=Timers.SLAC_ATTEN_RESULTS_TIMEOUT,
-                )
-                logger.debug("Payload Received: \n %s", hexlify(data_rcvd))
-                ether_frame = EthernetHeader.from_bytes(data_rcvd)
-                homeplug_frame = HomePlugHeader.from_bytes(data_rcvd)
-                if homeplug_frame.mm_type != CM_ATTEN_CHAR | MMTYPE_IND:
-                    logger.warning("Frame received is not CM_ATTEN_CHAR.IND")
-                    logger.debug("Continue waiting for CM_ATTEN_CHAR.IND...")
-                    continue
-                atten_char = AtennChar.from_bytes(data_rcvd)
-            except asyncio.TimeoutError as e:
-                raise TimeoutError("EV CM_ATTEN_CHAR timeout") from e
-            except Exception as e:
-                logger.exception(e, exc_info=True)
-                raise e
-
+        def validate_atten_char(atten_char, _ether_frame, homeplug_frame):
             if (
-                ether_frame.ether_type != ETH_TYPE_HPAV
-                or homeplug_frame.mmv != HOMEPLUG_MMV
-                or atten_char.run_id != self.run_id
+                atten_char.run_id != self.run_id
                 or atten_char.application_type != self.application_type
                 or atten_char.security_type != self.security_type
             ):
                 logger.warning(
                     "CM_ATTEN_CHAR.IND validation failed, ignoring frame"
                 )
-                continue
-            break
+                return False
+            return True
+
+        try:
+            _, ether_frame, _, atten_char = await self.wait_for_mme(
+                CM_ATTEN_CHAR | MMTYPE_IND,
+                Timers.SLAC_ATTEN_RESULTS_TIMEOUT,
+                AtennChar,
+                validate_atten_char,
+            )
+        except asyncio.TimeoutError as e:
+            raise TimeoutError("EV CM_ATTEN_CHAR timeout") from e
 
         # Learn the EVSE MAC from the Ethernet source address
         self.evse_mac = ether_frame.src_mac
@@ -351,6 +400,7 @@ class SlacEvSession(SlacSession):
             + homeplug_header.pack_big()
             + atten_char_rsp.pack_big()
         )
+        self.atten_char_rsp_frame = frame_to_send
 
         await self.send_frame(frame_to_send)
         logger.debug("Sent CM_ATTEN_CHAR.RSP")
@@ -378,33 +428,65 @@ class SlacEvSession(SlacSession):
         )
 
         await self.send_frame(frame_to_send)
+        self.slac_match_req_frame = frame_to_send
         logger.debug("Sent CM_SLAC_MATCH.REQ")
 
-        while True:
-            try:
-                data_rcvd = await self.rcv_frame(
-                    rcv_frame_size=FramesSizes.CM_SLAC_MATCH_CNF,
-                    timeout=Timers.SLAC_MATCH_TIMEOUT,
-                )
-                logger.debug("Payload Received: \n %s", hexlify(data_rcvd))
-                homeplug_frame = HomePlugHeader.from_bytes(data_rcvd)
-                if homeplug_frame.mm_type != CM_SLAC_MATCH | MMTYPE_CNF:
-                    logger.warning("Frame received is not CM_SLAC_MATCH.CNF")
-                    logger.debug("Continue waiting for CM_SLAC_MATCH.CNF...")
-                    continue
-                match_cnf = MatchCnf.from_bytes(data_rcvd)
-            except Exception as e:
-                logger.exception(e, exc_info=True)
-                raise ValueError("EV SLAC Match Failed") from e
+        duplicate_atten_char_count = 0
 
+        async def handle_unexpected_match_frame(
+            data_rcvd, _ether_frame, homeplug_frame
+        ):
+            nonlocal duplicate_atten_char_count
+            if homeplug_frame.mm_type != CM_ATTEN_CHAR | MMTYPE_IND:
+                return False
+
+            try:
+                atten_char = AtennChar.from_bytes(data_rcvd)
+            except Exception:
+                logger.exception("Failed parsing duplicate CM_ATTEN_CHAR.IND")
+                return False
+
+            if atten_char.run_id != self.run_id:
+                logger.warning(
+                    "Ignoring duplicate CM_ATTEN_CHAR.IND with wrong run_id"
+                )
+                return False
+
+            duplicate_atten_char_count += 1
+            if duplicate_atten_char_count > 3:
+                logger.warning("Ignoring repeated CM_ATTEN_CHAR.IND during SLAC match")
+                return True
+
+            logger.warning(
+                "Received duplicate CM_ATTEN_CHAR.IND during SLAC match; "
+                "re-sending CM_ATTEN_CHAR.RSP and CM_SLAC_MATCH.REQ"
+            )
+            await self.send_frame(self.atten_char_rsp_frame)
+            await asyncio.sleep(SLAC_PAUSE)
+            await self.send_frame(self.slac_match_req_frame)
+            return True
+
+        def validate_match_cnf(match_cnf, _ether_frame, _homeplug_frame):
             if match_cnf.run_id != self.run_id:
                 logger.warning(
                     "CM_SLAC_MATCH.CNF run_id mismatch: expected %s, got %s",
                     hexlify(self.run_id),
                     hexlify(match_cnf.run_id),
                 )
-                raise ValueError("EV SLAC Match CNF run_id mismatch")
-            break
+                return False
+            return True
+
+        try:
+            _, _, _, match_cnf = await self.wait_for_mme(
+                CM_SLAC_MATCH | MMTYPE_CNF,
+                Timers.SLAC_MATCH_TIMEOUT,
+                MatchCnf,
+                validate_match_cnf,
+                handle_unexpected_match_frame,
+            )
+        except Exception as e:
+            logger.exception(e, exc_info=True)
+            raise ValueError("EV SLAC Match Failed") from e
 
         # Store NMK and NID from the EVSE's logical network
         self.nmk = match_cnf.nmk
@@ -435,9 +517,10 @@ class SlacEvSession(SlacSession):
 
         try:
             await self.send_frame(frame_to_send)
-            data_rcvd = await self.rcv_frame(
-                rcv_frame_size=FramesSizes.CM_SET_KEY_CNF,
-                timeout=Timers.SLAC_INIT_TIMEOUT,
+            data_rcvd, _, _, _ = await self.wait_for_mme(
+                CM_SET_KEY | MMTYPE_CNF,
+                Timers.SLAC_INIT_TIMEOUT,
+                SetKeyCnf,
             )
         except asyncio.TimeoutError as e:
             raise TimeoutError("EV Join Network SetKey Timeout raised") from e
@@ -480,24 +563,15 @@ class SlacEvSession(SlacSession):
 
         try:
             await self.send_frame(frame_to_send)
-            # A CM_NW_INFO.CNF frame has at least 60 bytes (min ETH frame):
-            # EthernetHeader = 14 bytes
-            # HomePlugHeader = 5 bytes (mmv + mmtype + fmsn + fmid)
-            # NumNws = 1 byte
-            # Padding to reach min 60 bytes
-            payload_rcvd = await self.rcv_frame(
-                rcv_frame_size=60,
-                timeout=Timers.SLAC_INIT_TIMEOUT,
+            payload_rcvd, _, _, _ = await self.wait_for_mme(
+                CM_NW_INFO | MMTYPE_CNF,
+                Timers.SLAC_INIT_TIMEOUT,
             )
         except (asyncio.TimeoutError, Exception) as e:
             logger.debug("EV CM_NW_INFO: No response received: %s", e)
             return False
 
         try:
-            mm_type_rcvd = int.from_bytes(payload_rcvd[15:17], "little")
-            if mm_type_rcvd != (CM_NW_INFO | MMTYPE_CNF):
-                logger.warning("Message received is not CM_NW_INFO.CNF")
-                return False
             # NumNws is the number of networks the PLC chip has joined,
             # located after EthernetHeader(14) + HomePlugHeader(5)
             num_nws = payload_rcvd[19]
@@ -599,11 +673,13 @@ class SlacEvSessionController:
                     await asyncio.sleep(2.0)
                     link_active = await slac_session.ev_check_link_status()
                     if not link_active:
-                        logger.warning("EV-EVSE Link Lost (CM_NW_INFO)")
-                        slac_session.state = STATE_UNMATCHED
-                        break
-                # Link was lost; retry matching if retries remain
-                continue
+                        # HLC is already running; TCP/HLC failure will handle
+                        # a real loss.
+                        logger.warning(
+                            "EV-EVSE link status check failed after HLC start "
+                            "(CM_NW_INFO); keeping SLAC matched"
+                        )
+                        continue
 
         logger.debug("EV SLAC Protocol Concluded...")
 
